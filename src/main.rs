@@ -1,23 +1,21 @@
-extern crate futures;
-extern crate telegram_bot;
-extern crate tokio_core;
-
 use std::env;
+use std::time::{Duration, Instant, SystemTime};
 
-use futures::Stream;
+use futures::StreamExt;
+use telegram_bot::prelude::*;
 use telegram_bot::*;
-use tokio_core::reactor::Core;
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::sync::Mutex;
+use tokio::timer::delay;
 use std::collections::HashMap;
 
-enum QueueState {
+#[derive(Debug, Clone)]
+enum UserQueueState {
     OnboardInitial,
     OnboardInquiryReason,
     OnboardPersonalMessage,
     InQueue,
 }
 
+#[derive(Debug, Clone)]
 enum UserInquiryReason {
     Unknown,
     Technical,
@@ -26,18 +24,22 @@ enum UserInquiryReason {
     Community,
     Events,
     Emergency,
+    Custom(String),
 }
 
+#[derive(Debug, Clone)]
 struct UserInquiry {
     reason: UserInquiryReason,
     personal_message: Option<String>,
 }
 
+#[derive(Debug, Clone)]
 struct User {
     user_id: UserId,
     inquiry: UserInquiry,
     last_contact: SystemTime,
-    state: QueueState,
+    state: UserQueueState,
+    messages: Vec<Message>,
 }
 
 impl User {
@@ -49,7 +51,8 @@ impl User {
                 personal_message: None,
             },
             last_contact: SystemTime::now(),
-            state: QueueState::OnboardInitial,
+            state: UserQueueState::OnboardInitial,
+            messages: Vec::new(),
         }
     }
 }
@@ -57,6 +60,7 @@ impl User {
 struct Queue {
     order: Vec<UserId>,
     users: HashMap<UserId, User>,
+    current: Option<UserId>,
 }
 
 impl Queue {
@@ -64,6 +68,7 @@ impl Queue {
         Queue {
             order: Vec::new(),
             users: HashMap::new(),
+            current: None,
         }
     }
 
@@ -82,59 +87,45 @@ impl Queue {
 
     fn user(
         &mut self,
-        user_id: UserId,
-    ) -> (usize, &User) {
-        let mut pos = self.user_pos(&user_id);
+        user_id: &UserId,
+    ) -> &mut User {
+        let mut pos = self.user_pos(user_id);
 
         let user = self
             .users
-            .entry(user_id)
-            .or_insert(User::initial(&user_id));
+            .entry(user_id.clone())
+            .or_insert(User::initial(user_id));
 
-        match pos {
-            -1 => {
-                self.order.push(user_id);
-
-                (self.order.len(), &*user)
-            },
-            _ => (pos as usize, &*user)
+        if pos == -1 {
+            self.order.push(user_id.clone());
         }
+
+        user
     }
 }
 
-fn something(api: &Api) {
-    let user = UserId::new(51594512);
-
-    let reply_keyboard = reply_markup!(reply_keyboard, selective, one_time, resize,
-            ["technical", "content & substances"],
-            ["press & journalists", "community & outreach"],
-            ["events & invitations", "emergency"]
-        );
-
-    api.spawn(
-        SendMessage::new(
-            user,
-            "Thanks for contacting PsychonautWiki support. Please let us know the nature of your inquiry:",
-        )
-            .reply_markup(reply_keyboard)
-    );
-}
-
 struct Artemis {
+    arena_chat: SupergroupId,
+
     api: Api,
     queue: Queue,
 }
 
 impl Artemis {
-    fn new(api: Api) -> Artemis {
+    fn new(
+        api: Api,
+        arena_chat_id: i64,
+    ) -> Artemis {
         Artemis {
+            arena_chat: SupergroupId::new(arena_chat_id),
+
             api,
             queue: Queue::new(),
         }
     }
 
-    fn handle_update(
-        &self,
+    async fn handle_update(
+        &mut self,
         update: Update,
     ) {
         let update = dbg!(update);
@@ -142,95 +133,226 @@ impl Artemis {
         match update.kind {
             UpdateKind::Message(ref message) => {
                 self.handle_update_message(
-                    message.clone(),
-                    update,
-                );
+                        message.clone(),
+                        update,
+                    )
+                    .await;
             },
             _ => {}
         }
     }
 
-    fn handle_update_message(
-        &self,
+    async fn handle_update_message(
+        &mut self,
         message: Message,
         update: Update,
     ) {
-        if let MessageKind::Text { ref data, .. } = &message.kind {
-            self.handle_update_message_text(
-                data.clone(),
-                message,
-                update,
-            );
+        {
+            let user =
+                self.queue
+                    .user(&message.from.id);
 
-            return;
+            user.messages.push(message.clone());
         }
 
-        if let MessageKind::NewChatMembers { ref data, .. } = &message.kind {
-            self.handle_update_message_new_members(
-                data.iter().map(|user| user.id.clone()).collect(),
-                message,
-                update,
-            );
-
-            return;
+        {
+            if let MessageKind::Text { ref data, .. } = &message.kind {
+                match &**data {
+                    "+accept"
+                    | "+reject"
+                    | "+done"
+                    | "+next"
+                    | "+queue"
+                    => {
+                        self.handle_admin_ticket_command(
+                            data.clone(),
+                            message,
+                            update,
+                        )
+                            .await;
+                    },
+                    _ => {
+                        self.handle_update_message_text(
+                                data.clone(),
+                                message,
+                                update,
+                            )
+                            .await;
+                    }
+                }
+            }
         }
+
+        return;
     }
 
-    fn handle_update_message_new_members(
-        &self,
-        data: Vec<UserId>,
-        message: Message,
-        update: Update,
-    ) {
-    }
-
-    fn handle_update_message_text(
-        &self,
+    async fn handle_admin_ticket_command(
+        &mut self,
         data: String,
         message: Message,
         update: Update,
     ) {
-        self.api.spawn(
-            message
-                .text_reply(
-                    format!(
-                        "Hi, {}! You just wrote '{}'",
-                        &message.from.first_name, data
-                    )
-                )
+        match &*data {
+            "+accept" => {},
+            "+reject" => {},
+            "+done" => {},
+            "+next" => {},
+            "+queue" => {},
+            _ => {},
+        }
+    }
+
+    async fn handle_update_message_text(
+        &mut self,
+        data: String,
+        message: Message,
+        update: Update,
+    ) {
+        let state =
+            self.queue
+                .user(&message.from.id)
+                .clone()
+                .state;
+
+        match state {
+            UserQueueState::OnboardInitial =>
+                self.handle_user_state_onboard_initial(
+                    &message
+                ).await,
+            UserQueueState::OnboardInquiryReason =>
+                self.handle_user_state_onboard_inquiry_reason(
+                    &message,
+                    data,
+                ).await,
+            UserQueueState::OnboardPersonalMessage =>
+                self.handle_user_state_onboard_personal_message(
+                    &message,
+                    data,
+                ).await,
+            _ => {}
+        }
+    }
+
+    async fn handle_user_state_onboard_initial(
+        &mut self,
+        message: &Message,
+    ) {
+        let user = self.queue.user(&message.from.id);
+
+        user.state = UserQueueState::OnboardInquiryReason;
+
+        let reply_keyboard = reply_markup!(reply_keyboard, selective, one_time, resize,
+            ["technical", "content & substances"],
+            ["press & journalists", "community & outreach"],
+            ["events & invitations", "emergency"]
         );
+
+        let msg = self.api.send(
+            SendMessage::new(
+                &message.from.id,
+                "Thanks for contacting PsychonautWiki support. Please let us know the nature of your inquiry:",
+            )
+                .reply_markup(reply_keyboard)
+        ).await;
+
+        if let Ok(msg) = msg {
+            user.messages.push(msg.clone());
+        }
+    }
+
+    async fn handle_user_state_onboard_inquiry_reason(
+        &mut self,
+        message: &Message,
+        data: String,
+    ) {
+        let user = self.queue.user(&message.from.id);
+
+        let inquiry_reason = match &*data {
+            "technical" => UserInquiryReason::Technical,
+            "content & substances" => UserInquiryReason::Content,
+            "press & journalists" => UserInquiryReason::Press,
+            "community & outreach" => UserInquiryReason::Community,
+            "events & invitations" => UserInquiryReason::Events,
+            "emergency" => UserInquiryReason::Emergency,
+            _ => UserInquiryReason::Custom(data),
+        };
+
+        user.inquiry.reason = inquiry_reason;
+
+        user.state = UserQueueState::OnboardPersonalMessage;
+
+        let msg = self.api.send(
+            SendMessage::new(
+                &message.from.id,
+                "Thanks. Please give us a short summary of your inquiry:",
+            )
+        ).await;
+
+        if let Ok(msg) = msg {
+            user.messages.push(msg.clone());
+        }
+    }
+
+    async fn handle_user_state_onboard_personal_message(
+        &mut self,
+        message: &Message,
+        data: String,
+    ) {
+        let user = self.queue.user(&message.from.id);
+
+        user.inquiry.personal_message = Some(data);
+
+        user.state = UserQueueState::InQueue;
+
+        for msg in user.messages.iter() {
+            self.api.send(msg.delete()).await;
+        }
+
+        tokio::timer::delay_for(
+            Duration::new(0, 2e9 as u32),
+        );
+
+        let msg = self.api.send(
+            SendMessage::new(
+                &message.from.id,
+                format!(
+                    "Thanks, you're in queue! Please wait for a staff member to accept your request.",
+                ),
+            )
+        ).await;
+
+        if let Ok(msg) = msg {
+            user.messages.push(msg.clone());
+        }
+
+        user.messages = Vec::new();
     }
 }
 
-fn run(token: String) {
-    let mut core = Core::new().unwrap();
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    let token = env::var("TELEGRAM_BOT_TOKEN").expect("TELEGRAM_BOT_TOKEN not set");
 
-    let api = Api::configure(token)
-        .build(core.handle())
-        .unwrap();
+    let arena_chat_id = env::var("ARENA_CHAT_ID")
+        .expect("ARENA_CHAT_ID not set")
+        .parse::<i64>()
+        .expect("ARENA_CHAT_ID should be a number");
 
-    let artemis = Artemis::new(api.clone());
+    let api = Api::new(token);
 
-    let artm_mtx = Mutex::new(artemis);
+    let mut artemis = Artemis::new(
+        api.clone(),
+        arena_chat_id,
+    );
 
-    let future =
-        api
-            .stream()
-            .for_each(|update| {
-                artm_mtx
-                    .lock()
-                    .unwrap()
-                    .handle_update(update);
+    let mut stream = api.stream();
 
-                Ok(())
-        });
+    while let Some(update) = stream.next().await {
+        let update = update?;
 
-    core.run(future).unwrap();
-}
+        artemis.handle_update(update)
+               .await;
+    }
 
-fn main() {
-    let token = env::var("TELEGRAM_BOT_TOKEN")
-        .expect("TELEGRAM_BOT_TOKEN not set");
-
-    run(token);
+    Ok(())
 }

@@ -1,5 +1,5 @@
 [package]
-name = "artemis"
+name = "p1"
 version = "0.1.0"
 authors = ["Kenan Sulayman <kenan@sly.mn>"]
 edition = "2018"
@@ -7,6 +7,29 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-telegram-bot = "0.6.3"
-futures = "0.1.29"
-tokio-core = "0.1.17"
+futures-preview = "=0.3.0-alpha.19"
+
+telegram-bot = { path = "./telegram-bot/lib" }
+telegram-bot-raw = { path = "./telegram-bot/raw" }
+
+tokio = "0.2.0-alpha.5"
+
+[profile]
+
+[profile.dev]
+codegen-units = 3
+debug = true
+debug-assertions = true
+lto = false
+opt-level = 0
+panic = "unwind"
+rpath = true
+
+[profile.release]
+codegen-utis = 1
+lto = true
+debug = false
+debug-assertions = false
+opt-level = 3
+panic = "abort"
+rpath = true
