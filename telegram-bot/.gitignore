@@ -1,0 +1,10 @@
+target
+Cargo.lock
+*.sublime-workspace
+*.sublime-project
+.idea/
+
+.idea
+*.iml
+
+bot-token.sh
