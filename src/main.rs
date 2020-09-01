@@ -1,10 +1,10 @@
 use std::env;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use futures::StreamExt;
 use telegram_bot::prelude::*;
 use telegram_bot::*;
-use tokio::timer::delay;
+
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -89,7 +89,7 @@ impl Queue {
         &mut self,
         user_id: &UserId,
     ) -> &mut User {
-        let mut pos = self.user_pos(user_id);
+        let pos = self.user_pos(user_id);
 
         let user = self
             .users
@@ -189,8 +189,8 @@ impl Artemis {
     async fn handle_admin_ticket_command(
         &mut self,
         data: String,
-        message: Message,
-        update: Update,
+        _message: Message,
+        _update: Update,
     ) {
         match &*data {
             "+accept" => {},
@@ -206,7 +206,7 @@ impl Artemis {
         &mut self,
         data: String,
         message: Message,
-        update: Update,
+        _update: Update,
     ) {
         let state =
             self.queue
@@ -256,7 +256,9 @@ impl Artemis {
         ).await;
 
         if let Ok(msg) = msg {
-            user.messages.push(msg.clone());
+            if let MessageOrChannelPost::Message(msg) = msg {
+                user.messages.push(msg.clone())
+            }
         }
     }
 
@@ -289,7 +291,9 @@ impl Artemis {
         ).await;
 
         if let Ok(msg) = msg {
-            user.messages.push(msg.clone());
+            if let MessageOrChannelPost::Message(msg) = msg {
+                user.messages.push(msg.clone())
+            }
         }
     }
 
@@ -308,7 +312,7 @@ impl Artemis {
             self.api.send(msg.delete()).await;
         }
 
-        tokio::timer::delay_for(
+        tokio::time::delay_for(
             Duration::new(0, 2e9 as u32),
         );
 
@@ -322,7 +326,9 @@ impl Artemis {
         ).await;
 
         if let Ok(msg) = msg {
-            user.messages.push(msg.clone());
+            if let MessageOrChannelPost::Message(msg) = msg {
+                user.messages.push(msg.clone())
+            }
         }
 
         user.messages = Vec::new();
